@@ -3,6 +3,15 @@ import sys
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from types import ModuleType
+
+# Mock MultiScaleDeformableAttention C++ extension to prevent import crashes when it is not compiled
+if "MultiScaleDeformableAttention" not in sys.modules:
+    mock_msda = ModuleType("MultiScaleDeformableAttention")
+    # Add dummy attributes to satisfy any import checks
+    mock_msda.ms_deform_attn_forward = lambda *args, **kwargs: None
+    mock_msda.ms_deform_attn_backward = lambda *args, **kwargs: None
+    sys.modules["MultiScaleDeformableAttention"] = mock_msda
 
 # Add the official DINO repo to system path if needed
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "official_dino")))
@@ -58,6 +67,36 @@ def ms_deform_attn_core_pytorch(value, value_spatial_shapes, sampling_locations,
     output = output.view(N_, M_, D_, Lq_).transpose(1, 3)
     return output
 
+def ms_deform_attn_forward_patched(self, query, reference_points, input_flatten, input_spatial_shapes, input_level_start_index, input_padding_mask=None):
+    N, Len_q, _ = query.shape
+    N, Len_in, _ = input_flatten.shape
+    assert (input_spatial_shapes[:, 0] * input_spatial_shapes[:, 1]).sum() == Len_in
+
+    value = self.value_proj(input_flatten)
+    if input_padding_mask is not None:
+        value = value.masked_fill(input_padding_mask.unsqueeze(-1), float(0))
+    value = value.view(N, Len_in, self.n_heads, self.d_model // self.n_heads)
+    
+    # Calculate sampling offsets and attention weights
+    sampling_offsets = self.sampling_offsets(query).view(N, Len_q, self.n_heads, self.n_levels, self.n_points, 2)
+    attention_weights = self.attention_weights(query).view(N, Len_q, self.n_heads, self.n_levels * self.n_points)
+    attention_weights = F.softmax(attention_weights, -1).view(N, Len_q, self.n_heads, self.n_levels, self.n_points)
+    
+    # Map reference points
+    if reference_points.shape[-1] == 2:
+        offset_normalizer = torch.stack([input_spatial_shapes[..., 1], input_spatial_shapes[..., 0]], -1)
+        sampling_locations = reference_points.unsqueeze(2).unsqueeze(-2) + \
+                             sampling_offsets / offset_normalizer.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+    elif reference_points.shape[-1] == 4:
+        sampling_locations = reference_points[:, :, None, :, None, :2] + \
+                             sampling_offsets / self.n_points * reference_points[:, :, None, :, None, 2:] * 0.5
+    else:
+        raise ValueError(f"Last dim of reference_points must be 2 or 4, but got {reference_points.shape[-1]}")
+        
+    # Execute the pure PyTorch fallback attention
+    output = ms_deform_attn_core_pytorch(value, input_spatial_shapes, sampling_locations, attention_weights)
+    return self.output_proj(output)
+
 # ======================================================================
 # 2. Setup Compilation & Monkey-Patching for Deformable Attention
 # ======================================================================
@@ -83,36 +122,20 @@ def compile_and_setup_deform_attn() -> str:
                 print("[SUCCESS] DINO CUDA operators compiled successfully.")
                 compiled_successfully = True
             else:
-                print(f"[WARNING] DINO CUDA compilation failed (missing C++ compiler/env). Fallback will be used. Error:\n{res.stderr}")
+                print(f"[WARNING] DINO CUDA compilation failed (missing C++ compiler/env). Fallback will be used.")
         except Exception as e:
             print(f"[WARNING] DINO CUDA compilation encountered an exception: {e}. Falling back to PyTorch.")
             
     # Mocking the MultiScaleDeformableAttention C++ module if not compiled
     if not compiled_successfully:
         print("[INFO] Applying pure PyTorch fallback for MultiScaleDeformableAttention (F.grid_sample).")
-        
-        # Define a mock module class that behaves like the compiled C++ extension
-        class MSDeformAttnFunctionMock(torch.autograd.Function):
-            @staticmethod
-            def forward(ctx, value, value_spatial_shapes, value_level_start_index, sampling_locations, attention_weights, im2col_step):
-                # Save tensors for backward pass
-                ctx.save_for_backward(value, value_spatial_shapes, value_level_start_index, sampling_locations, attention_weights)
-                ctx.im2col_step = im2col_step
-                return ms_deform_attn_core_pytorch(value, value_spatial_shapes, sampling_locations, attention_weights)
-
-            @staticmethod
-            @torch.autograd.function.once_differentiable
-            def backward(ctx, grad_output):
-                # Backward pass is automatically handled by PyTorch autograd graph since grid_sample is differentiable!
-                # However, since this is a custom autograd Function wrapper, we must return gradients matching the forward signature.
-                # To bypass writing complex custom backward derivatives, we can either:
-                # 1. Let PyTorch's native autograd compute it by executing ms_deform_attn_core_pytorch inside forward 
-                #    without wrapping it in a manual Function.
-                # This is why our final fallback module will simply call ms_deform_attn_core_pytorch directly in eager mode!
-                pass
-                
-        # To avoid custom autograd Function backward issues, we override the module's forward method directly.
-        # Let's inspect the target module to patch in the next steps.
+        try:
+            # Dynamically import and monkey patch MSDeformAttn to use pure PyTorch fallback
+            from models.dino.ops.modules.ms_deform_attn import MSDeformAttn
+            MSDeformAttn.forward = ms_deform_attn_forward_patched
+            print("[SUCCESS] Monkey-patched MSDeformAttn.forward with Pure PyTorch fallback.")
+        except Exception as patch_err:
+            print(f"[WARNING] Failed to monkey-patch MSDeformAttn: {patch_err}")
         return "Pure PyTorch Fallback"
         
     return "CUDA C++"
