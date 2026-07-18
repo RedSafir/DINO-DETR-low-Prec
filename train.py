@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import argparse
 import time
 import torch
@@ -36,7 +37,7 @@ def evaluate(model, val_loader, device, coco_gt_path):
             
             # Forward pass
             # Wrap in autocast disable just to guarantee FP32 murninya
-            with torch.cuda.amp.autocast(enabled=False):
+            with torch.amp.autocast(device_type=device.type, enabled=False):
                 outputs = model(images)
                 
             # outputs: dict containing 'pred_logits' and 'pred_boxes'
@@ -323,10 +324,14 @@ def train_baseline(args):
         class MockCriterion(torch.nn.Module):
             def forward(self, outputs, targets):
                 cls_loss = outputs["pred_logits"].mean() * 0.0
-                box_loss = outputs["pred_boxes"].mean() * 0.0
-                for target in targets:
-                    if target["boxes"].shape[0] > 0:
-                        box_loss += F.l1_loss(outputs["pred_boxes"][:, :target["boxes"].shape[0]], target["boxes"].unsqueeze(0).to(device))
+                box_loss = torch.tensor(0.0, device=outputs["pred_boxes"].device)
+                pred_boxes = outputs["pred_boxes"]
+                for i, target in enumerate(targets):
+                    tgt_boxes = target["boxes"]
+                    num_boxes = tgt_boxes.shape[0]
+                    if num_boxes > 0:
+                        p_boxes = pred_boxes[i, :num_boxes]
+                        box_loss = box_loss + F.l1_loss(p_boxes, tgt_boxes)
                 return {"loss_ce": cls_loss, "loss_bbox": box_loss, "loss_giou": box_loss * 0.5}
         criterion = MockCriterion()
 
@@ -354,7 +359,7 @@ def train_baseline(args):
             
             try:
                 # Force FP32 execution (no mixed precision context)
-                with torch.cuda.amp.autocast(enabled=False):
+                with torch.amp.autocast(device_type=device.type, enabled=False):
                     outputs = model(images)
                     loss_dict = criterion(outputs, targets)
                     weight_dict = getattr(criterion, "weight_dict", {"loss_ce": 1.0, "loss_bbox": 5.0, "loss_giou": 2.0})
