@@ -5,7 +5,7 @@ import yaml
 from PIL import Image, ImageDraw, ImageFont
 
 # Path configuration
-DATASET_DIR = "../merged_yolo_person_ball"
+DATASET_DIR = "./merged_yolo_person_ball"
 OUTPUT_DIR = "."
 SANITY_DIR = "./sanity_checks"
 
