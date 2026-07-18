@@ -3,6 +3,10 @@ import json
 import yaml
 from PIL import Image, ImageDraw
 
+# Force pure Python JSON encoder to prevent low-level C-extension crashes (SystemError) on Windows/debuggers
+import json.encoder
+json.encoder.c_make_encoder = None
+
 # Path configuration
 DATASET_DIR = "./merged_yolo_person_ball"
 OUTPUT_DIR = "."
@@ -146,10 +150,12 @@ def convert_yolo_to_coco():
         return
 
     # Write output JSON files
+    print("Writing annotations_train.json...")
     with open(os.path.join(OUTPUT_DIR, "annotations_train.json"), 'w') as f:
-        json.dump(train_coco, f)
+        f.write(json.dumps(train_coco))
+    print("Writing annotations_val.json...")
     with open(os.path.join(OUTPUT_DIR, "annotations_val.json"), 'w') as f:
-        json.dump(val_coco, f)
+        f.write(json.dumps(val_coco))
 
     print("[SUCCESS] annotations_train.json and annotations_val.json generated successfully!")
 
