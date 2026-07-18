@@ -161,8 +161,9 @@ class DETRTransforms:
 
     def _to_tensor_and_normalize(self, img, target):
         # Convert PIL to PyTorch Tensor [C, H, W] in [0, 1] range
-        img_tensor = torch.ByteTensor(torch.ByteStorage.from_buffer(img.tobytes()))
-        img_tensor = img_tensor.view(img.size[1], img.size[0], 3).transpose(0, 1).transpose(0, 2).contiguous()
+        import numpy as np
+        img_np = np.array(img)
+        img_tensor = torch.from_numpy(img_np).permute(2, 0, 1).contiguous()
         img_tensor = img_tensor.float().div(255.0)
         
         # Normalize

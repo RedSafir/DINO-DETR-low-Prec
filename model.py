@@ -178,7 +178,12 @@ def build_dino_model(num_classes: int, checkpoint_path: str = None, device: str 
                 self.class_embed = nn.ModuleList([nn.Linear(256, 91) for _ in range(6)])
                 self.dec_pred_class_embed_share = True
             def forward(self, x):
-                return {"pred_logits": torch.randn(x.size(0), 900, 91, device=x.device)}
+                batch_size = len(x) if isinstance(x, list) else x.size(0)
+                device = x[0].device if isinstance(x, list) else x.device
+                return {
+                    "pred_logits": torch.randn(batch_size, 900, 91, device=device),
+                    "pred_boxes": torch.rand(batch_size, 900, 4, device=device)
+                }
         model = PlaceholderDINO()
         criterion = None
 
