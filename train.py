@@ -1,6 +1,8 @@
 import os
 import sys
 import json
+import json.encoder
+json.encoder.c_make_encoder = None
 import argparse
 import time
 import torch
@@ -108,7 +110,7 @@ def evaluate(model, val_loader, device, coco_gt_path):
     # Write temp predictions file
     results_path = "temp_results.json"
     with open(results_path, 'w') as f:
-        json.dump(results, f)
+        f.write(json.dumps(results))
         
     # Run COCO Eval
     try:
