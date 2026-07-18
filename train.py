@@ -205,12 +205,16 @@ def run_overfit_check(model, device):
         print("[WARNING] Official DINO Criterion not found. Using custom mock loss for sanity check.")
         class MockCriterion(torch.nn.Module):
             def forward(self, outputs, targets):
-                # Simple L1 distance of box outputs and classification output dummy
                 cls_loss = outputs["pred_logits"].mean() * 0.0
-                box_loss = outputs["pred_boxes"].mean() * 0.0
-                for target in targets:
-                    if target["boxes"].shape[0] > 0:
-                        box_loss += F.l1_loss(outputs["pred_boxes"][:, :target["boxes"].shape[0]], target["boxes"].unsqueeze(0).to(device))
+                box_loss = torch.tensor(0.0, device=outputs["pred_boxes"].device)
+                
+                pred_boxes = outputs["pred_boxes"]
+                for i, target in enumerate(targets):
+                    tgt_boxes = target["boxes"]
+                    num_boxes = tgt_boxes.shape[0]
+                    if num_boxes > 0:
+                        p_boxes = pred_boxes[i, :num_boxes]
+                        box_loss = box_loss + F.l1_loss(p_boxes, tgt_boxes)
                 return {"loss_ce": cls_loss, "loss_bbox": box_loss, "loss_giou": box_loss * 0.5}
         criterion = MockCriterion()
         
