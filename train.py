@@ -3,6 +3,7 @@ import sys
 import argparse
 import time
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
