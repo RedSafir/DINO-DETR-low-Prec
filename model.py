@@ -163,7 +163,8 @@ def build_dino_model(num_classes: int, checkpoint_path: str = None, device: str 
         from models.dino.dino import build_dino
         # Create a dummy args class representing config arguments
         class Args:
-            def __init__(self):
+            def __init__(self, device):
+                self.device = device
                 self.backbone = 'resnet50'
                 self.dilation = False
                 self.position_embedding = 'sine'
@@ -190,7 +191,7 @@ def build_dino_model(num_classes: int, checkpoint_path: str = None, device: str 
                 self.dec_pred_class_embed_share = True
                 self.num_classes = 91  # Initialize with COCO class count first
 
-        args = Args()
+        args = Args(str(device))
         model, criterion, postprocessors = build_dino(args)
     except ImportError:
         print("[WARNING] Official DINO repository files not imported yet. Creating placeholder PyTorch model for testing...")
