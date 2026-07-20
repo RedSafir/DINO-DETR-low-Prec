@@ -23,6 +23,29 @@ def get_vram_info():
         return f"[VRAM Status] GPU: {gpu_name} | Total: {total_mem:.1f}MB | Allocated: {allocated_mem:.1f}MB | Cached: {cached_mem:.1f}MB"
     return "[VRAM Status] Running on CPU (No CUDA VRAM info)"
 
+def download_pretrained_weights(dest_path="dino_r50_4scale_12ep.pth"):
+    import urllib.request
+    url = "https://github.com/IDEA-Research/DINO/releases/download/v1.0.0/dino_r50_4scale_12ep.pth"
+    if os.path.exists(dest_path):
+        print(f"[INFO] Pretrained weights already exist at '{dest_path}'.")
+        return dest_path
+        
+    print(f"[INFO] Downloading official DINO pretrained COCO weights from {url}...")
+    try:
+        # Simple progress logger
+        def progress_hook(count, block_size, total_size):
+            percent = int(count * block_size * 100 / total_size)
+            sys.stdout.write(f"\rDownloading: {percent}% completed")
+            sys.stdout.flush()
+                
+        urllib.request.urlretrieve(url, dest_path, reporthook=progress_hook)
+        print(f"\n[SUCCESS] Downloaded weights to '{dest_path}'.")
+        return dest_path
+    except Exception as e:
+        print(f"\n[WARNING] Failed to download weights automatically: {e}")
+        print("[WARNING] Training will proceed from scratch if no local checkpoint is provided.")
+        return None
+
 def evaluate(model, val_loader, device, coco_gt_path):
     model.eval()
     coco_gt = COCO(coco_gt_path)
@@ -263,6 +286,10 @@ def train_baseline(args):
     print(f"Target Execution Device: {device}")
     print(get_vram_info())
     
+    # 0. Check and download pretrained checkpoint if default is used and doesn't exist
+    if args.checkpoint == "dino_r50_4scale_12ep.pth":
+        args.checkpoint = download_pretrained_weights(args.checkpoint)
+        
     # 1. Initialize Model
     model = build_dino_model(num_classes=2, checkpoint_path=args.checkpoint, device=device)
     
@@ -431,7 +458,7 @@ if __name__ == '__main__':
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--weight-decay", type=float, default=1e-4, help="Weight decay")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Execution device")
-    parser.add_argument("--checkpoint", type=str, default=None, help="Pretrained model weights checkpoint path")
+    parser.add_argument("--checkpoint", type=str, default="dino_r50_4scale_12ep.pth", help="Pretrained model weights checkpoint path")
     parser.add_argument("--overfit-check", action="store_true", help="Run overfitting check on 10 images")
     parser.add_argument("--log-interval", type=int, default=50, help="Interval for printing training loss logs")
     
