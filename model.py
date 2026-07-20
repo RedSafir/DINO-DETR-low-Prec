@@ -117,7 +117,7 @@ def compile_and_setup_deform_attn() -> str:
             cmd = [
                 sys.executable,
                 "-c",
-                "import sys; import torch.utils.cpp_extension; torch.utils.cpp_extension._check_cuda_version = lambda *a, **kw: None; sys.argv = ['setup.py', 'build', 'develop']; exec(open('setup.py').read())"
+                "import sys; import os; import torch.utils.cpp_extension; torch.utils.cpp_extension._check_cuda_version = lambda *a, **kw: None; sys.argv = ['setup.py', 'build', 'develop']; glob = globals(); glob['__file__'] = os.path.abspath('setup.py'); exec(open('setup.py').read(), glob)"
             ]
             res = subprocess.run(
                 cmd,
