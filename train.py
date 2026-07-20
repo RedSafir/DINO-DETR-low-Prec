@@ -197,36 +197,15 @@ def run_overfit_check(model, device):
     # Try importing official criterion or use custom loss mock
     try:
         from models.dino.dino import build_dino
-        # Get criterion from builder
-        class Args:
-            def __init__(self):
-                self.backbone = 'resnet50'
-                self.dilation = False
-                self.position_embedding = 'sine'
-                self.pe_temperatureH = 20
-                self.pe_temperatureW = 20
-                self.masks = False
-                self.num_feature_levels = 4
-                self.enc_layers = 6
-                self.dec_layers = 6
-                self.dim_feedforward = 2048
-                self.hidden_dim = 256
-                self.dropout = 0.0
-                self.nheads = 8
-                self.num_queries = 900
-                self.dec_n_points = 4
-                self.enc_n_points = 4
-                self.two_stage = True
-                self.num_patterns = 0
-                self.dn_number = 100
-                self.dn_box_noise_scale = 0.4
-                self.dn_label_noise_scale = 0.5
-                self.dn_labelbook_size = 3
-                self.dec_pred_class_embed_share = True
-                self.num_classes = 2
-        _, criterion, _ = build_dino(Args())
+        from util.slconfig import SLConfig
+        config_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "official_dino", "config", "DINO", "DINO_4scale.py"))
+        dino_args = SLConfig.fromfile(config_path)
+        dino_args.device = str(device)
+        dino_args.num_classes = 2
+        dino_args.dn_labelbook_size = 3
+        _, criterion, _ = build_dino(dino_args)
         criterion.to(device)
-    except Exception:
+    except Exception as e:
         # Simple mock criterion for structural pipeline execution
         print("[WARNING] Official DINO Criterion not found. Using custom mock loss for sanity check.")
         class MockCriterion(torch.nn.Module):
@@ -255,7 +234,7 @@ def run_overfit_check(model, device):
             targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
             
             optimizer.zero_grad()
-            outputs = model(images)
+            outputs = model(images, targets)
             
             loss_dict = criterion(outputs, targets)
             weight_dict = getattr(criterion, "weight_dict", {"loss_ce": 1.0, "loss_bbox": 5.0, "loss_giou": 2.0})
@@ -319,36 +298,15 @@ def train_baseline(args):
     # Define criterion
     try:
         from models.dino.dino import build_dino
-        # Get criterion from builder
-        class DINOArgs:
-            def __init__(self):
-                self.backbone = 'resnet50'
-                self.dilation = False
-                self.position_embedding = 'sine'
-                self.pe_temperatureH = 20
-                self.pe_temperatureW = 20
-                self.masks = False
-                self.num_feature_levels = 4
-                self.enc_layers = 6
-                self.dec_layers = 6
-                self.dim_feedforward = 2048
-                self.hidden_dim = 256
-                self.dropout = 0.0
-                self.nheads = 8
-                self.num_queries = 900
-                self.dec_n_points = 4
-                self.enc_n_points = 4
-                self.two_stage = True
-                self.num_patterns = 0
-                self.dn_number = 100
-                self.dn_box_noise_scale = 0.4
-                self.dn_label_noise_scale = 0.5
-                self.dn_labelbook_size = 3
-                self.dec_pred_class_embed_share = True
-                self.num_classes = 2
-        _, criterion, _ = build_dino(DINOArgs())
+        from util.slconfig import SLConfig
+        config_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "official_dino", "config", "DINO", "DINO_4scale.py"))
+        dino_args = SLConfig.fromfile(config_path)
+        dino_args.device = str(device)
+        dino_args.num_classes = 2
+        dino_args.dn_labelbook_size = 3
+        _, criterion, _ = build_dino(dino_args)
         criterion.to(device)
-    except Exception:
+    except Exception as e:
         print("[WARNING] Official DINO Criterion not found. Using fallback mock loss.")
         class MockCriterion(torch.nn.Module):
             def forward(self, outputs, targets):
@@ -389,7 +347,7 @@ def train_baseline(args):
             try:
                 # Force FP32 execution (no mixed precision context)
                 with torch.amp.autocast(device_type=device.type, enabled=False):
-                    outputs = model(images)
+                    outputs = model(images, targets)
                     loss_dict = criterion(outputs, targets)
                     weight_dict = getattr(criterion, "weight_dict", {"loss_ce": 1.0, "loss_bbox": 5.0, "loss_giou": 2.0})
                     losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
