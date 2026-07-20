@@ -161,37 +161,16 @@ def build_dino_model(num_classes: int, checkpoint_path: str = None, device: str 
     # We will assume official DINO is cloned. Here we implement the wrapper logic.
     try:
         from models.dino.dino import build_dino
-        # Create a dummy args class representing config arguments
-        class Args:
-            def __init__(self, device):
-                self.device = device
-                self.backbone = 'resnet50'
-                self.dilation = False
-                self.position_embedding = 'sine'
-                self.pe_temperatureH = 20
-                self.pe_temperatureW = 20
-                self.masks = False
-                # DINO specific configs
-                self.num_feature_levels = 4
-                self.enc_layers = 6
-                self.dec_layers = 6
-                self.dim_feedforward = 2048
-                self.hidden_dim = 256
-                self.dropout = 0.0
-                self.nheads = 8
-                self.num_queries = 900
-                self.dec_n_points = 4
-                self.enc_n_points = 4
-                self.two_stage = True
-                self.num_patterns = 0
-                self.dn_number = 100
-                self.dn_box_noise_scale = 0.4
-                self.dn_label_noise_scale = 0.5
-                self.dn_labelbook_size = 91 + 1 # COCO class count + 1 for denoising background
-                self.dec_pred_class_embed_share = True
-                self.num_classes = 91  # Initialize with COCO class count first
-
-        args = Args(str(device))
+        from util.slconfig import SLConfig
+        
+        config_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "official_dino", "config", "DINO", "DINO_4scale.py"))
+        print(f"[MODEL CONFIG] Loading official configuration from '{config_path}'...")
+        args = SLConfig.fromfile(config_path)
+        
+        # Override runtime values
+        args.device = str(device)
+        args.num_classes = 91  # COCO class count first to load pretrained weights strictly
+        args.dn_labelbook_size = 91 + 1
         model, criterion, postprocessors = build_dino(args)
     except ImportError:
         print("[WARNING] Official DINO repository files not imported yet. Creating placeholder PyTorch model for testing...")
