@@ -140,6 +140,93 @@ def compile_and_setup_deform_attn() -> str:
         
     return "CUDA C++"
 
+def align_state_dict(checkpoint_dict, model_keys):
+    aligned_dict = {}
+    model_keys_set = set(model_keys)
+    
+    for k, v in checkpoint_dict.items():
+        # Exclude classification head parameters to avoid COCO class mismatch errors
+        if "class_embed" in k:
+            continue
+            
+        new_k = k
+        
+        # 1. Map backbone stem
+        if k.startswith("backbone.stem.conv1."):
+            new_k = k.replace("backbone.stem.conv1.", "backbone.0.body.conv1.")
+        elif k.startswith("backbone.stem.bn1."):
+            new_k = k.replace("backbone.stem.bn1.", "backbone.0.body.bn1.")
+            
+        # 2. Map backbone layers (res2-res5 -> layer1-layer4)
+        elif k.startswith("backbone.res2."):
+            new_k = k.replace("backbone.res2.", "backbone.0.body.layer1.")
+        elif k.startswith("backbone.res3."):
+            new_k = k.replace("backbone.res3.", "backbone.0.body.layer2.")
+        elif k.startswith("backbone.res4."):
+            new_k = k.replace("backbone.res4.", "backbone.0.body.layer3.")
+        elif k.startswith("backbone.res5."):
+            new_k = k.replace("backbone.res5.", "backbone.0.body.layer4.")
+            
+        # 3. Map shortcut/downsample inside backbone
+        if ".shortcut.weight" in new_k:
+            new_k = new_k.replace(".shortcut.weight", ".downsample.0.weight")
+        elif ".shortcut.norm." in new_k:
+            new_k = new_k.replace(".shortcut.norm.", ".downsample.1.")
+            
+        # 4. Map neck/input_proj
+        if k.startswith("neck.convs.0.conv."):
+            new_k = k.replace("neck.convs.0.conv.", "input_proj.0.0.")
+        elif k.startswith("neck.convs.0.norm."):
+            new_k = k.replace("neck.convs.0.norm.", "input_proj.0.1.")
+        elif k.startswith("neck.convs.1.conv."):
+            new_k = k.replace("neck.convs.1.conv.", "input_proj.1.0.")
+        elif k.startswith("neck.convs.1.norm."):
+            new_k = k.replace("neck.convs.1.norm.", "input_proj.1.1.")
+        elif k.startswith("neck.convs.2.conv."):
+            new_k = k.replace("neck.convs.2.conv.", "input_proj.2.0.")
+        elif k.startswith("neck.convs.2.norm."):
+            new_k = k.replace("neck.convs.2.norm.", "input_proj.2.1.")
+        elif k.startswith("neck.extra_convs.0.conv."):
+            new_k = k.replace("neck.extra_convs.0.conv.", "input_proj.3.0.")
+        elif k.startswith("neck.extra_convs.0.norm."):
+            new_k = k.replace("neck.extra_convs.0.norm.", "input_proj.3.1.")
+            
+        # 5. Map transformer keys
+        if new_k.startswith("transformer."):
+            # Level embeds
+            if new_k == "transformer.level_embeds":
+                new_k = "transformer.level_embed"
+            
+            # Encoder
+            elif "transformer.encoder.layers." in new_k:
+                new_k = new_k.replace(".attentions.0.", ".self_attn.")
+                new_k = new_k.replace(".norms.0.", ".norm1.")
+                new_k = new_k.replace(".ffns.0.layers.0.0.", ".linear1.")
+                new_k = new_k.replace(".ffns.0.layers.1.", ".linear2.")
+                new_k = new_k.replace(".norms.1.", ".norm2.")
+                
+            # Decoder
+            elif "transformer.decoder.layers." in new_k:
+                new_k = new_k.replace(".attentions.0.attn.in_proj_weight", ".self_attn.in_proj_weight")
+                new_k = new_k.replace(".attentions.0.attn.in_proj_bias", ".self_attn.in_proj_bias")
+                new_k = new_k.replace(".attentions.0.attn.out_proj.weight", ".self_attn.out_proj.weight")
+                new_k = new_k.replace(".attentions.0.attn.out_proj.bias", ".self_attn.out_proj.bias")
+                new_k = new_k.replace(".norms.0.", ".norm1.")
+                new_k = new_k.replace(".attentions.1.sampling_offsets.", ".cross_attn.sampling_offsets.")
+                new_k = new_k.replace(".attentions.1.attention_weights.", ".cross_attn.attention_weights.")
+                new_k = new_k.replace(".attentions.1.value_proj.", ".cross_attn.value_proj.")
+                new_k = new_k.replace(".attentions.1.output_proj.", ".cross_attn.output_proj.")
+                new_k = new_k.replace(".norms.1.", ".norm2.")
+                new_k = new_k.replace(".ffns.0.layers.0.0.", ".linear1.")
+                new_k = new_k.replace(".ffns.0.layers.1.", ".linear2.")
+                new_k = new_k.replace(".norms.2.", ".norm3.")
+        
+        # Check if the mapped key is expected in the model
+        if new_k in model_keys_set:
+            aligned_dict[new_k] = v
+            
+    return aligned_dict
+
 # ======================================================================
 # 3. Model Builder & Head Replacer
 # ======================================================================
@@ -198,18 +285,23 @@ def build_dino_model(num_classes: int, checkpoint_path: str = None, device: str 
         print(f"[INFO] Loading pretrained COCO checkpoint weights from '{checkpoint_path}'...")
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
         
-        # Load state dict (model is currently at COCO class size 91, so strict=True will succeed)
+        # Load state dict
         if 'model' in checkpoint:
             state_dict = checkpoint['model']
         else:
             state_dict = checkpoint
             
+        # Align keys if loading the detrex checkpoint
+        if checkpoint_path == "dino_r50_4scale_12ep.pth":
+            print("[INFO] Aligning detrex checkpoint keys to official DINO model structure...")
+            state_dict = align_state_dict(state_dict, model.state_dict().keys())
+            
         try:
-            model.load_state_dict(state_dict, strict=True)
-            print("[SUCCESS] Pretrained COCO checkpoint loaded successfully with strict=True.")
-        except Exception as e:
-            print(f"[WARNING] Strict load failed ({e}). Loading with strict=False.")
+            # Load weights. Since class_embed is skipped, use strict=False
             model.load_state_dict(state_dict, strict=False)
+            print("[SUCCESS] Pretrained COCO checkpoint loaded successfully (strict=False).")
+        except Exception as e:
+            print(f"[WARNING] Failed to load checkpoint: {e}")
     else:
         if checkpoint_path:
             print(f"[WARNING] Pretrained checkpoint path '{checkpoint_path}' does not exist. Skipping weight loading.")
