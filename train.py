@@ -286,8 +286,8 @@ def train_baseline(args):
     
     # Safe Dataloader builder
     def build_loaders(bs):
-        t_loader = DataLoader(train_dataset, batch_size=bs, shuffle=True, num_workers=2, collate_fn=collate_fn, drop_last=True)
-        v_loader = DataLoader(val_dataset, batch_size=bs, shuffle=False, num_workers=2, collate_fn=collate_fn)
+        t_loader = DataLoader(train_dataset, batch_size=bs, shuffle=True, num_workers=0, collate_fn=collate_fn, drop_last=True)
+        v_loader = DataLoader(val_dataset, batch_size=bs, shuffle=False, num_workers=0, collate_fn=collate_fn)
         return t_loader, v_loader
         
     train_loader, val_loader = build_loaders(batch_size)
