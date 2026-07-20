@@ -14,7 +14,7 @@ if "MultiScaleDeformableAttention" not in sys.modules:
     sys.modules["MultiScaleDeformableAttention"] = mock_msda
 
 # Add the official DINO repo to system path if needed
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "official_dino")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "official_dino")))
 
 # ======================================================================
 # 1. Pure PyTorch Fallback for Multi-Scale Deformable Attention
@@ -172,8 +172,8 @@ def build_dino_model(num_classes: int, checkpoint_path: str = None, device: str 
         args.num_classes = 91  # COCO class count first to load pretrained weights strictly
         args.dn_labelbook_size = 91 + 1
         model, criterion, postprocessors = build_dino(args)
-    except ImportError:
-        print("[WARNING] Official DINO repository files not imported yet. Creating placeholder PyTorch model for testing...")
+    except ImportError as e:
+        print(f"[WARNING] Official DINO repository files not imported yet. Error: {e}. Creating placeholder PyTorch model for testing...")
         # Placeholder model for structural testing
         class PlaceholderDINO(nn.Module):
             def __init__(self):
