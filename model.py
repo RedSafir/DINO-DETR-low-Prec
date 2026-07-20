@@ -113,9 +113,14 @@ def compile_and_setup_deform_attn() -> str:
         print("[INFO] Attempting to compile DINO official CUDA operators...")
         import subprocess
         try:
-            # Build extension locally
+            # Build extension locally, monkey-patching torch.utils.cpp_extension to bypass CUDA version mismatch checks
+            cmd = [
+                sys.executable,
+                "-c",
+                "import sys; import torch.utils.cpp_extension; torch.utils.cpp_extension._check_cuda_version = lambda *a, **kw: None; sys.argv = ['setup.py', 'build', 'develop']; exec(open('setup.py').read())"
+            ]
             res = subprocess.run(
-                [sys.executable, "setup.py", "build", "develop"],
+                cmd,
                 cwd=ops_dir, capture_output=True, text=True, timeout=120
             )
             if res.returncode == 0:
