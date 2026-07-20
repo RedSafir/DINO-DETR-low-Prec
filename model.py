@@ -122,7 +122,9 @@ def compile_and_setup_deform_attn() -> str:
                 print("[SUCCESS] DINO CUDA operators compiled successfully.")
                 compiled_successfully = True
             else:
-                print(f"[WARNING] DINO CUDA compilation failed (missing C++ compiler/env). Fallback will be used.")
+                print(f"[WARNING] DINO CUDA compilation failed. Fallback will be used.")
+                print(f"[COMPILER STDERR]\n{res.stderr}")
+                print(f"[COMPILER STDOUT]\n{res.stdout}")
         except Exception as e:
             print(f"[WARNING] DINO CUDA compilation encountered an exception: {e}. Falling back to PyTorch.")
             
