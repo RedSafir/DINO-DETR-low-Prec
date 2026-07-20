@@ -25,7 +25,7 @@ def get_vram_info():
 
 def download_pretrained_weights(dest_path="dino_r50_4scale_12ep.pth"):
     import urllib.request
-    url = "https://github.com/IDEA-Research/DINO/releases/download/v1.0.0/dino_r50_4scale_12ep.pth"
+    url = "https://github.com/IDEA-Research/detrex-storage/releases/download/v0.2.1/dino_r50_4scale_12ep.pth"
     if os.path.exists(dest_path):
         print(f"[INFO] Pretrained weights already exist at '{dest_path}'.")
         return dest_path
