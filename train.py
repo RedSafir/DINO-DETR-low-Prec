@@ -418,7 +418,7 @@ if __name__ == '__main__':
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Execution device")
     parser.add_argument("--checkpoint", type=str, default="dino_r50_4scale_12ep.pth", help="Pretrained model weights checkpoint path")
     parser.add_argument("--overfit-check", action="store_true", help="Run overfitting check on 10 images")
-    parser.add_argument("--log-interval", type=int, default=50, help="Interval for printing training loss logs")
+    parser.add_argument("--log-interval", type=int, default=5, help="Interval for printing training loss logs")
     
     args = parser.parse_args()
     train_baseline(args)
