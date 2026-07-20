@@ -143,10 +143,9 @@ def compile_and_setup_deform_attn() -> str:
 def align_state_dict(checkpoint_dict, model_keys):
     aligned_dict = {}
     model_keys_set = set(model_keys)
-    
     for k, v in checkpoint_dict.items():
-        # Exclude classification head parameters to avoid COCO class mismatch errors
-        if "class_embed" in k:
+        # Exclude classification head and label encoder to avoid size mismatches
+        if "class_embed" in k or "label_enc" in k:
             continue
             
         new_k = k
