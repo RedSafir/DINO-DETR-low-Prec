@@ -109,10 +109,19 @@ def compile_and_setup_deform_attn() -> str:
     ops_dir = os.path.join(os.path.dirname(__file__), "official_dino", "models", "dino", "ops")
     compiled_successfully = False
     
-    if os.path.exists(ops_dir):
+    # Set force_compile to True if you want to attempt C++ compilation on Windows.
+    # On Windows, path limits (260 chars) and DLL conflicts often crash torchvision when compiling.
+    force_compile = True
+    
+    if os.path.exists(ops_dir) and (sys.platform != "win32" or force_compile):
         print("[INFO] Attempting to compile DINO official CUDA operators...")
         import subprocess
         try:
+            # Set environment variables to bypass the MSVC traditional preprocessor warning from CUDA CCCL headers
+            env = os.environ.copy()
+            env["CL"] = env.get("CL", "") + " /DCCCL_IGNORE_MSVC_TRADITIONAL_PREPROCESSOR_WARNING"
+            env["CUDAFLAGS"] = env.get("CUDAFLAGS", "") + " -DCCCL_IGNORE_MSVC_TRADITIONAL_PREPROCESSOR_WARNING"
+            
             # Build extension locally, monkey-patching torch.utils.cpp_extension to bypass CUDA version mismatch checks
             cmd = [
                 sys.executable,
@@ -121,7 +130,7 @@ def compile_and_setup_deform_attn() -> str:
             ]
             res = subprocess.run(
                 cmd,
-                cwd=ops_dir, capture_output=True, text=True, timeout=120
+                cwd=ops_dir, capture_output=True, text=True, timeout=120, env=env
             )
             if res.returncode == 0:
                 print("[SUCCESS] DINO CUDA operators compiled successfully.")
