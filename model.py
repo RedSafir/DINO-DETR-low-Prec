@@ -64,7 +64,7 @@ def ms_deform_attn_core_pytorch(value, value_spatial_shapes, sampling_locations,
     output = (stacked_sampled_values * attention_weights).sum(-1)
     
     # Reshape back to [N, Lq, M, D]
-    output = output.view(N_, M_, D_, Lq_).transpose(1, 3)
+    output = output.view(N_, M_, D_, Lq_).permute(0, 3, 1, 2).flatten(2)
     return output
 
 def ms_deform_attn_forward_patched(self, query, reference_points, input_flatten, input_spatial_shapes, input_level_start_index, input_padding_mask=None):
