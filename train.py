@@ -224,7 +224,9 @@ def run_overfit_check(model, device, img_size=800):
                 return {"loss_ce": cls_loss, "loss_bbox": box_loss, "loss_giou": box_loss * 0.5}
         criterion = MockCriterion()
     # Mixed precision setup
-    scaler = torch.cuda.amp.GradScaler(enabled=True)
+    use_bf16 = torch.cuda.is_bf16_supported()
+    amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
+    scaler = torch.cuda.amp.GradScaler(enabled=(amp_dtype == torch.float16))
     
     start_loss = None
     final_loss = None
@@ -238,17 +240,23 @@ def run_overfit_check(model, device, img_size=800):
             
             optimizer.zero_grad()
             
-            # Autocast forward pass to FP16
-            with torch.amp.autocast(device_type="cuda", enabled=True, dtype=torch.float16):
+            # Autocast forward pass
+            with torch.amp.autocast(device_type="cuda", enabled=True, dtype=amp_dtype):
                 outputs = model(images, targets)
                 loss_dict = criterion(outputs, targets)
                 weight_dict = getattr(criterion, "weight_dict", {"loss_ce": 1.0, "loss_bbox": 5.0, "loss_giou": 2.0})
                 losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
             
-            # Scales loss and calls backward()
-            scaler.scale(losses).backward()
-            scaler.step(optimizer)
-            scaler.update()
+            if scaler.is_enabled():
+                scaler.scale(losses).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                losses.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
+                optimizer.step()
             
             epoch_loss += losses.item()
             
@@ -330,9 +338,11 @@ def train_baseline(args):
         criterion = MockCriterion()
 
     # Mixed precision setup
-    scaler = torch.cuda.amp.GradScaler(enabled=True)
+    use_bf16 = torch.cuda.is_bf16_supported()
+    amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
+    scaler = torch.cuda.amp.GradScaler(enabled=(amp_dtype == torch.float16))
     best_map = 0.0
-    print("Starting Training Loop (FP16 Mixed Precision / AMP)...")
+    print(f"Starting Training Loop (AMP enabled, dtype: {amp_dtype}, GradScaler: {amp_dtype == torch.float16})...")
     
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -355,8 +365,8 @@ def train_baseline(args):
             targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
             
             try:
-                # Enable FP16 Mixed Precision (AMP)
-                with torch.amp.autocast(device_type="cuda", enabled=True, dtype=torch.float16):
+                # Enable FP16/BF16 Mixed Precision (AMP)
+                with torch.amp.autocast(device_type="cuda", enabled=True, dtype=amp_dtype):
                     outputs = model(images, targets)
                     loss_dict = criterion(outputs, targets)
                     weight_dict = getattr(criterion, "weight_dict", {"loss_ce": 1.0, "loss_bbox": 5.0, "loss_giou": 2.0})
@@ -364,10 +374,17 @@ def train_baseline(args):
                     
                 optimizer.zero_grad()
                 
-                # Scaled backward pass
-                scaler.scale(losses).backward()
-                scaler.step(optimizer)
-                scaler.update()
+                # Backward pass & gradient clipping
+                if scaler.is_enabled():
+                    scaler.scale(losses).backward()
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    losses.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
+                    optimizer.step()
                 
                 epoch_loss += losses.item()
                 batch_idx += 1
