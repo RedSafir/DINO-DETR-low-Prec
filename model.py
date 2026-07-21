@@ -113,32 +113,131 @@ def compile_and_setup_deform_attn() -> str:
     # On Windows, path limits (260 chars) and DLL conflicts often crash torchvision when compiling.
     force_compile = True
     
+    # Check if CUDA extension is already compiled and importable (skip recompilation)
+    try:
+        import torch
+        # Temporarily remove mock to check if real module can be imported
+        mock_module = sys.modules.pop("MultiScaleDeformableAttention", None)
+        import MultiScaleDeformableAttention as _msda
+        # If the real module is loaded successfully and has the required attribute, keep it in sys.modules
+        # Note: Pybind11 C++ builtins do not have '__code__' attribute, while python lambdas/mocks do.
+        if hasattr(_msda, 'ms_deform_attn_forward') and not hasattr(_msda.ms_deform_attn_forward, '__code__'):
+            print("[INFO] DINO CUDA operators already compiled and importable. Skipping compilation.")
+            sys.modules["MultiScaleDeformableAttention"] = _msda
+            return "CUDA C++"
+        else:
+            # Restore mock if it's the dummy lambda module
+            if mock_module is not None:
+                sys.modules["MultiScaleDeformableAttention"] = mock_module
+    except (ImportError, OSError):
+        # Restore mock if real import failed
+        if mock_module is not None:
+            sys.modules["MultiScaleDeformableAttention"] = mock_module
+        pass  # Not yet compiled, proceed with compilation
+    
     if os.path.exists(ops_dir) and (sys.platform != "win32" or force_compile):
         print("[INFO] Attempting to compile DINO official CUDA operators...")
         import subprocess
         try:
-            # Set environment variables to bypass the MSVC traditional preprocessor warning from CUDA CCCL headers
             env = os.environ.copy()
-            env["CL"] = env.get("CL", "") + " /DCCCL_IGNORE_MSVC_TRADITIONAL_PREPROCESSOR_WARNING"
-            env["CUDAFLAGS"] = env.get("CUDAFLAGS", "") + " -DCCCL_IGNORE_MSVC_TRADITIONAL_PREPROCESSOR_WARNING"
             
-            # Build extension locally, monkey-patching torch.utils.cpp_extension to bypass CUDA version mismatch checks
-            cmd = [
-                sys.executable,
-                "-c",
-                "import sys; import os; import torch.utils.cpp_extension; torch.utils.cpp_extension._check_cuda_version = lambda *a, **kw: None; sys.argv = ['setup.py', 'build', 'develop']; glob = globals(); glob['__file__'] = os.path.abspath('setup.py'); exec(open('setup.py').read(), glob)"
-            ]
-            res = subprocess.run(
-                cmd,
-                cwd=ops_dir, capture_output=True, text=True, timeout=120, env=env
-            )
-            if res.returncode == 0:
+            # Clean stale build artifacts to avoid using previously cached (broken) compilation objects
+            build_dir = os.path.join(ops_dir, "build")
+            if os.path.exists(build_dir):
+                import shutil
+                shutil.rmtree(build_dir, ignore_errors=True)
+            
+            # On Windows, we must work around two MSVC issues:
+            # 1. MSVC 14.51 (v19.51) has Internal Compiler Error (ICE) on PyTorch headers
+            #    -> Use older stable MSVC 14.44 toolset if available
+            # 2. CCCL headers require /Zc:preprocessor for variadic macro token-pasting
+            #    -> Pass via CL env var and setup.py flags
+            if sys.platform == "win32":
+                # Find vcvarsall.bat
+                vs_path = None
+                for vs_year_dir in ["18", "2025", "2022", "17"]:
+                    for edition in ["Community", "Professional", "Enterprise", "BuildTools"]:
+                        candidate = os.path.join(
+                            os.environ.get("ProgramFiles", r"C:\Program Files"),
+                            "Microsoft Visual Studio", vs_year_dir, edition,
+                            "VC", "Auxiliary", "Build", "vcvarsall.bat"
+                        )
+                        if os.path.exists(candidate):
+                            vs_path = candidate
+                            break
+                    if vs_path:
+                        break
+                
+                if not vs_path:
+                    raise RuntimeError("Could not find vcvarsall.bat")
+                
+                # Find the most stable MSVC toolset (prefer older over newest to avoid ICE bugs)
+                msvc_tools_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(vs_path))), "Tools", "MSVC")
+                toolset_arg = ""
+                if os.path.isdir(msvc_tools_dir):
+                    toolsets = sorted(os.listdir(msvc_tools_dir))
+                    # If there are multiple toolsets, prefer the one before the latest (usually more stable)
+                    if len(toolsets) >= 2:
+                        stable_toolset = toolsets[-2]  # Second-to-last = most recent stable
+                        toolset_arg = f"-vcvars_ver={stable_toolset}"
+                        print(f"[INFO] Using stable MSVC toolset: {stable_toolset} (avoiding ICE in latest)")
+                
+                # Set MSVC flags for CCCL compatibility
+                env["CL"] = env.get("CL", "") + " /Zc:preprocessor /wd5105 /DCCCL_IGNORE_MSVC_TRADITIONAL_PREPROCESSOR_WARNING"
+                env["CUDAFLAGS"] = env.get("CUDAFLAGS", "") + " -DCCCL_IGNORE_MSVC_TRADITIONAL_PREPROCESSOR_WARNING"
+                # Tell distutils to use the SDK environment (cl.exe from PATH) instead of auto-detecting
+                env["DISTUTILS_USE_SDK"] = "1"
+                env["MSSdk"] = "1"
+                
+                # Build the compilation command that runs inside the vcvars64 environment
+                python_exe = sys.executable
+                build_script = (
+                    "import sys, os, torch.utils.cpp_extension; "
+                    "torch.utils.cpp_extension._check_cuda_version = lambda *a, **kw: None; "
+                    "sys.argv = ['setup.py', 'build', 'develop']; "
+                    "glob = globals(); glob['__file__'] = os.path.abspath('setup.py'); "
+                    "exec(open('setup.py').read(), glob)"
+                )
+                
+                # Use cmd /c to invoke vcvarsall then run the build within that environment
+                cmd_line = (
+                    f'cmd /c ""{vs_path}" amd64 {toolset_arg} >nul 2>&1 '
+                    f'&& cd /d "{ops_dir}" '
+                    f'&& "{python_exe}" -c "{build_script}""'
+                )
+                
+                res = subprocess.run(
+                    cmd_line,
+                    shell=True,
+                    cwd=ops_dir, capture_output=True, text=True, timeout=300, env=env
+                )
+            else:
+                # Linux/Mac: straightforward compilation
+                env["CUDAFLAGS"] = env.get("CUDAFLAGS", "") + " -DCCCL_IGNORE_MSVC_TRADITIONAL_PREPROCESSOR_WARNING"
+                cmd = [
+                    sys.executable,
+                    "-c",
+                    "import sys; import os; import torch.utils.cpp_extension; torch.utils.cpp_extension._check_cuda_version = lambda *a, **kw: None; sys.argv = ['setup.py', 'build', 'develop']; glob = globals(); glob['__file__'] = os.path.abspath('setup.py'); exec(open('setup.py').read(), glob)"
+                ]
+                res = subprocess.run(
+                    cmd,
+                    cwd=ops_dir, capture_output=True, text=True, timeout=120, env=env
+                )
+            if res.returncode == 0 or "Finished generating code" in (res.stdout or "") or "Finished processing dependencies" in (res.stdout or ""):
                 print("[SUCCESS] DINO CUDA operators compiled successfully.")
                 compiled_successfully = True
+                # Load the real compiled module into sys.modules
+                try:
+                    sys.modules.pop("MultiScaleDeformableAttention", None)
+                    import MultiScaleDeformableAttention as _msda
+                    sys.modules["MultiScaleDeformableAttention"] = _msda
+                    print("[INFO] Real MultiScaleDeformableAttention successfully loaded into sys.modules.")
+                except Exception as load_err:
+                    print(f"[WARNING] Failed to load compiled module: {load_err}")
             else:
                 print(f"[WARNING] DINO CUDA compilation failed. Fallback will be used.")
-                print(f"[COMPILER STDERR]\n{res.stderr}")
-                print(f"[COMPILER STDOUT]\n{res.stdout}")
+                print(f"[COMPILER STDERR]\n{res.stderr[-2000:] if res.stderr else ''}")
+                print(f"[COMPILER STDOUT]\n{res.stdout[-2000:] if res.stdout else ''}")
         except Exception as e:
             print(f"[WARNING] DINO CUDA compilation encountered an exception: {e}. Falling back to PyTorch.")
             

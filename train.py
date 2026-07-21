@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
+from tqdm import tqdm
 
 from dataset import FootballDataset, DETRTransforms, collate_fn
 from model import build_dino_model
@@ -175,7 +176,7 @@ def evaluate(model, val_loader, device, coco_gt_path):
             os.remove(results_path)
         return 0.0, 0.0
 
-def run_overfit_check(model, device):
+def run_overfit_check(model, device, img_size=800):
     """
     Overfitting sanity check: Trains the model on a tiny subset of 10 images
     for 50 epochs and verifies if the loss drops significantly.
@@ -185,11 +186,11 @@ def run_overfit_check(model, device):
     print("==========================================================")
     
     # Load dataset with only 10 images
-    train_dataset = FootballDataset("annotations_train.json", "./merged_yolo_person_ball/images/train", transforms=DETRTransforms(is_train=True))
+    train_dataset = FootballDataset("annotations_train.json", "./merged_yolo_person_ball/images/train", transforms=DETRTransforms(is_train=True, min_size=img_size))
     # Slice to 10 images
     train_dataset.img_ids = train_dataset.img_ids[:10]
     
-    loader = DataLoader(train_dataset, batch_size=2, shuffle=False, collate_fn=collate_fn)
+    loader = DataLoader(train_dataset, batch_size=2, shuffle=False, collate_fn=collate_fn, pin_memory=True)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
     model.train()
@@ -222,7 +223,9 @@ def run_overfit_check(model, device):
                         box_loss = box_loss + F.l1_loss(p_boxes, tgt_boxes)
                 return {"loss_ce": cls_loss, "loss_bbox": box_loss, "loss_giou": box_loss * 0.5}
         criterion = MockCriterion()
-        
+    # Mixed precision setup
+    scaler = torch.cuda.amp.GradScaler(enabled=True)
+    
     start_loss = None
     final_loss = None
     
@@ -234,14 +237,18 @@ def run_overfit_check(model, device):
             targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
             
             optimizer.zero_grad()
-            outputs = model(images, targets)
             
-            loss_dict = criterion(outputs, targets)
-            weight_dict = getattr(criterion, "weight_dict", {"loss_ce": 1.0, "loss_bbox": 5.0, "loss_giou": 2.0})
+            # Autocast forward pass to FP16
+            with torch.amp.autocast(device_type="cuda", enabled=True, dtype=torch.float16):
+                outputs = model(images, targets)
+                loss_dict = criterion(outputs, targets)
+                weight_dict = getattr(criterion, "weight_dict", {"loss_ce": 1.0, "loss_bbox": 5.0, "loss_giou": 2.0})
+                losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
             
-            losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
-            losses.backward()
-            optimizer.step()
+            # Scales loss and calls backward()
+            scaler.scale(losses).backward()
+            scaler.step(optimizer)
+            scaler.update()
             
             epoch_loss += losses.item()
             
@@ -274,20 +281,20 @@ def train_baseline(args):
     
     # 2. Run Overfit Check if requested
     if args.overfit_check:
-        run_overfit_check(model, device)
+        run_overfit_check(model, device, img_size=args.img_size)
         return
         
     # 3. Load full Datasets
-    print("Setting up full dataset dataloaders...")
-    train_dataset = FootballDataset("annotations_train.json", "./merged_yolo_person_ball/images/train", transforms=DETRTransforms(is_train=True))
-    val_dataset = FootballDataset("annotations_val.json", "./merged_yolo_person_ball/images/val", transforms=DETRTransforms(is_train=False))
+    print(f"Setting up full dataset dataloaders (resolution: {args.img_size})...")
+    train_dataset = FootballDataset("annotations_train.json", "./merged_yolo_person_ball/images/train", transforms=DETRTransforms(is_train=True, min_size=args.img_size))
+    val_dataset = FootballDataset("annotations_val.json", "./merged_yolo_person_ball/images/val", transforms=DETRTransforms(is_train=False, min_size=args.img_size))
     
     batch_size = args.batch_size
     
     # Safe Dataloader builder
     def build_loaders(bs):
-        t_loader = DataLoader(train_dataset, batch_size=bs, shuffle=True, num_workers=0, collate_fn=collate_fn, drop_last=True)
-        v_loader = DataLoader(val_dataset, batch_size=bs, shuffle=False, num_workers=0, collate_fn=collate_fn)
+        t_loader = DataLoader(train_dataset, batch_size=bs, shuffle=True, num_workers=0, collate_fn=collate_fn, drop_last=True, pin_memory=True)
+        v_loader = DataLoader(val_dataset, batch_size=bs, shuffle=False, num_workers=0, collate_fn=collate_fn, pin_memory=True)
         return t_loader, v_loader
         
     train_loader, val_loader = build_loaders(batch_size)
@@ -322,8 +329,10 @@ def train_baseline(args):
                 return {"loss_ce": cls_loss, "loss_bbox": box_loss, "loss_giou": box_loss * 0.5}
         criterion = MockCriterion()
 
+    # Mixed precision setup
+    scaler = torch.cuda.amp.GradScaler(enabled=True)
     best_map = 0.0
-    print("Starting Training Loop (FP32 baseline)...")
+    print("Starting Training Loop (FP16 Mixed Precision / AMP)...")
     
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -331,6 +340,7 @@ def train_baseline(args):
         start_time = time.time()
         
         # Batch loop with OOM Fallback recovery
+        epoch_pbar = tqdm(total=len(train_loader), desc=f"Epoch {epoch}/{args.epochs}", unit="batch")
         loader_iter = iter(train_loader)
         batch_idx = 0
         
@@ -345,26 +355,34 @@ def train_baseline(args):
             targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
             
             try:
-                # Force FP32 execution (no mixed precision context)
-                with torch.amp.autocast(device_type=device.type, enabled=False):
+                # Enable FP16 Mixed Precision (AMP)
+                with torch.amp.autocast(device_type="cuda", enabled=True, dtype=torch.float16):
                     outputs = model(images, targets)
                     loss_dict = criterion(outputs, targets)
                     weight_dict = getattr(criterion, "weight_dict", {"loss_ce": 1.0, "loss_bbox": 5.0, "loss_giou": 2.0})
                     losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
                     
                 optimizer.zero_grad()
-                losses.backward()
-                optimizer.step()
+                
+                # Scaled backward pass
+                scaler.scale(losses).backward()
+                scaler.step(optimizer)
+                scaler.update()
                 
                 epoch_loss += losses.item()
                 batch_idx += 1
                 
-                if batch_idx % args.log_interval == 0:
-                    print(f"Epoch {epoch} [{batch_idx}/{len(train_loader)}] - Loss: {losses.item():.4f} | {get_vram_info()}")
+                # Update progress bar
+                epoch_pbar.update(1)
+                epoch_pbar.set_postfix({
+                    "loss": f"{losses.item():.4f}",
+                    "avg_loss": f"{epoch_loss / batch_idx:.4f}"
+                })
                     
             except RuntimeError as e:
                 # Catch Out-Of-Memory (OOM) error
                 if "out of memory" in str(e).lower():
+                    epoch_pbar.close()
                     print("\n[OOM ALERT] Out of memory detected during forward/backward pass!")
                     print(get_vram_info())
                     torch.cuda.empty_cache()
@@ -382,11 +400,15 @@ def train_baseline(args):
                         print("[FATAL OOM] Batch size is already 1. Cannot reduce further. Exiting.")
                         raise e
                 else:
+                    epoch_pbar.close()
                     raise e
                     
+        epoch_pbar.close()
+        
         # Calculate validation metrics
         avg_loss = epoch_loss / max(1, batch_idx)
-        print(f"\n--- Epoch {epoch} Complete | Average Loss: {avg_loss:.4f} | Time: {time.time() - start_time:.2f}s ---")
+        total_epoch_time = time.time() - start_time
+        print(f"\n[EPOCH COMPLETE] Epoch {epoch}/{args.epochs} - Average Loss: {avg_loss:.4f} - Total Time: {total_epoch_time:.2f}s")
         
         # Validation Eval
         val_map_50, val_map_50_95 = evaluate(model, val_loader, device, "annotations_val.json")
@@ -410,7 +432,7 @@ def train_baseline(args):
             print(f"[CHECKPOINT] Saved new best model with mAP@0.5: {best_map:.4f}")
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="DINO-DETR FP32 Baseline Object Detection Training")
+    parser = argparse.ArgumentParser(description="DINO-DETR Mixed Precision Training")
     parser.add_argument("--epochs", type=int, default=12, help="Number of training epochs")
     parser.add_argument("--batch-size", type=int, default=4, help="Training batch size")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
@@ -419,6 +441,7 @@ if __name__ == '__main__':
     parser.add_argument("--checkpoint", type=str, default="dino_r50_4scale_12ep.pth", help="Pretrained model weights checkpoint path")
     parser.add_argument("--overfit-check", action="store_true", help="Run overfitting check on 10 images")
     parser.add_argument("--log-interval", type=int, default=5, help="Interval for printing training loss logs")
+    parser.add_argument("--img-size", type=int, default=800, help="Target image size (shorter edge) for training and evaluation")
     
     args = parser.parse_args()
     train_baseline(args)

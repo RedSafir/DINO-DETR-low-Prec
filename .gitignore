@@ -1,1 +1,11 @@
 merged_yolo_person_ball/
+merged_dataset/
+__pycache__/
+*.pyc
+*.pth
+annotations_train.json
+annotations_val.json
+sanity_checks/
+official_dino/models/dino/ops/build/
+official_dino/models/dino/ops/MultiScaleDeformableAttention.egg-info/
+official_dino/models/dino/ops/*.pyd

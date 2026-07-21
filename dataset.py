@@ -103,10 +103,25 @@ class FootballDataset(Dataset):
 # Custom Augmentations for DINO-DETR (Small-Object Preserving)
 # ======================================================================
 class DETRTransforms:
-    def __init__(self, is_train=True, min_size=800, max_size=1333):
+    def __init__(self, is_train=True, min_size=800, max_size=1333, scales=None):
         self.is_train = is_train
         self.min_size = min_size
-        self.max_size = max_size
+        
+        # Scale max_size proportionally if using custom min_size
+        if min_size != 800 and max_size == 1333:
+            self.max_size = int(round(min_size * 1.666))
+        else:
+            self.max_size = max_size
+            
+        if scales is None:
+            # Generate a step-based scale selection up to min_size (similar to default COCO)
+            step = 32
+            start = int((min_size * 0.6) // step * step)
+            self.scales = list(range(start, min_size + step, step))
+            if not self.scales:
+                self.scales = [min_size]
+        else:
+            self.scales = scales
         
         # ImageNet normalization parameters
         self.mean = [0.485, 0.456, 0.406]
@@ -195,8 +210,8 @@ class DETRTransforms:
     def __call__(self, img, target):
         # 1. Random resize (Short-side resizing)
         if self.is_train:
-            # Randomly select a target short edge size
-            size = random.choice([480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800])
+            # Randomly select a target short edge size from dynamic scales
+            size = random.choice(self.scales)
         else:
             size = self.min_size
             
